@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="176" viewBox="0 0 640 176" role="img" aria-labelledby="title desc">
+  <title id="title">Quiz &amp; Quer</title><desc id="desc">Limettengrünes Q mit einem quer nach rechts unten laufenden Pfeil. Schriftzug Quiz &amp; Quer auf dunklem Hintergrund.</desc>
+  <rect width="640" height="176" rx="24" fill="#111315"/>
+  <g transform="translate(28 28) scale(.9375)">
+    <rect width="128" height="128" rx="32" fill="#d4f386"/>
+    <circle cx="58" cy="57" r="28" fill="none" stroke="#171d18" stroke-width="13"/>
+    <path d="M63 64 96 97M78 97h18V79" fill="none" stroke="#171d18" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="58" cy="57" r="5" fill="#171d18"/>
+  </g>
+  <text x="176" y="91" fill="#f3f4f1" font-family="Segoe UI,Arial,sans-serif" font-weight="700" font-size="53" letter-spacing="-2">Quiz &amp; Quer</text>
+  <text x="178" y="125" fill="#a9b3a6" font-family="Segoe UI,Arial,sans-serif" font-size="17" letter-spacing="1">GUTE FRAGEN. QUERE GEDANKEN.</text>
+</svg>

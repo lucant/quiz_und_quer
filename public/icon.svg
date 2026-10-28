@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Quiz &amp; Quer – Q mit querlaufendem Pfeil</title>
+  <rect width="128" height="128" rx="32" fill="#d4f386"/>
+  <circle cx="58" cy="57" r="28" fill="none" stroke="#171d18" stroke-width="13"/>
+  <path d="M63 64 96 97M78 97h18V79" fill="none" stroke="#171d18" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="58" cy="57" r="5" fill="#171d18"/>
+</svg>
