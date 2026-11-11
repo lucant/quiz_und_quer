@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {JSDOM} from 'jsdom';
 import {GameStore} from '../lib/game.js';
 function ui(t){
- const dom=new JSDOM('<div id="app"></div><div id="toast"></div>',{url:'http://localhost:3000',runScripts:'outside-only'});
+ const dom=new JSDOM('<div id="app"></div><div id="toast"></div>',{url:'http://localhost:3000',runScripts:'outside-only',pretendToBeVisual:true});
  t.after(()=>dom.window.close());
  const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/route\(\);\s*$/,'window.ui={renderHost,renderPlayer,renderTV,renderEditor,deleteItem,avatarPicker,dashboard,setDraft(v){draft=v},setState(v){state=v},init(){config={addresses:[]}}};');
  dom.window.eval(source);dom.window.ui.init();return dom.window;

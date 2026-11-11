@@ -27,7 +27,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || join(root,'data'),
   function file(req,res,path) {
     assert(existsSync(path), 'Datei nicht gefunden.', 404);
     const size = statSync(path).size;
-    const headers = {'Content-Type': types[extname(path)] || 'application/octet-stream', 'X-Content-Type-Options':'nosniff', 'Accept-Ranges':'bytes', 'Cache-Control':'no-cache'};
+    const headers = {'Content-Type': types[extname(path)] || 'application/octet-stream', 'X-Content-Type-Options':'nosniff', 'Accept-Ranges':'bytes', 'Cache-Control':path.endsWith('.js') || path.endsWith('.css') || path.endsWith('.html') ? 'no-store' : 'no-cache'};
     const range = req.headers.range;
     if (range) {
       const match = /^bytes=(\d+)-(\d*)$/.exec(range);
@@ -92,6 +92,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || join(root,'data'),
         else if (data.toString('ascii',0,3)==='ID3' || (data[0]===255 && (data[1]&224)===224)) ext='mp3';
         else if (data.toString('ascii',4,8)==='ftyp' && ['M4A ','isom','mp42'].includes(data.toString('ascii',8,12))) ext='m4a';
         assert(ext,'Unterstützt: PNG, JPG, GIF, WebP, MP3, WAV, OGG, M4A.');
+        if (url.searchParams.get('type') === 'image') assert(['png','jpg','gif','webp'].includes(ext), 'Bitte ein PNG-, JPG-, GIF- oder WebP-Bild auswählen.');
         const id = `${randomUUID()}.${ext}`; writeFileSync(join(dataDir,'uploads',id),data);
         return send(res,201,{id,type:['png','jpg','gif','webp'].includes(ext)?'image':'audio'});
       }

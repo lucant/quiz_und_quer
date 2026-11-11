@@ -71,10 +71,42 @@ test('Veraltete Moderation, doppelte Namen, Teilnehmerlimit und private Daten',t
 
 test('Medien und Lösungen erscheinen nicht vor Freigabe auf Gästeansichten',t=>{
   const db=setup(t);const input=quiz();input.questions[0].media={id:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.png',type:'image',name:'Foto'};
+  const solutionImage={id:'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jpg',type:'image',name:'Auflösung'};
+  input.questions[0].solutionImage=solutionImage;
   const q=db.saveQuiz(input),s=db.createSession(q.id),p=db.join(s.id,{name:'Gast'});act(db,s.id,'start');
   assert.equal(db.view(s.id,'tv').question.media,undefined);act(db,s.id,'media',{visible:true,playing:false,position:0});
   assert.equal(db.view(s.id,'tv').question.media.type,'image');assert.equal(db.view(s.id,'player',p.token).question.media,undefined);
   assert.equal(db.view(s.id,'player',p.token).question.solution,undefined);
+  const views=()=>[db.view(s.id,'player',p.token),db.view(s.id,'tv')];
+  for(const view of views()) assert.equal(view.question.solutionImage,undefined);
+  act(db,s.id,'close');
+  for(const view of views()) assert.equal(view.question.solutionImage,undefined);
+  act(db,s.id,'reveal');
+  for(const view of views()) assert.deepEqual(view.question.solutionImage,solutionImage);
+});
+
+test('Freitext je Ort: Teilantworten, manuelle Wertung und getrennte Auflösung', t=>{
+  const db=setup(t), input=quiz();
+  const pairs=['Springfield','Hawkins','Stars Hollow','Winden','Twin Peaks'].map((left,i)=>({left,right:'Serie '+i}));
+  input.categories=['Serien','Musik'];
+  input.questions=[{text:'Welche Serie spielt dort?',type:'multiText',category:'Serien',pairs}];
+  const saved=db.saveQuiz(input);
+  assert.deepEqual(saved.categories,['Serien','Musik']);
+  const s=db.createSession(saved.id), p=db.join(s.id,{name:'Team A'});
+  act(db,s.id,'start');
+  const view=()=>db.view(s.id,'player',p.token);
+  assert.deepEqual(view().question.labels,pairs.map(pair=>pair.left));
+  assert.equal(view().question.pairs,undefined);
+  assert.throws(()=>db.answer(s.id,p.token,{index:0,value:['zu kurz']}));
+  const values=['Simpsons','Stranger Things','','Dark',''];
+  db.answer(s.id,p.token,{index:0,value:values});
+  assert.deepEqual(view().answer.value,values);
+  act(db,s.id,'close');
+  assert.throws(()=>act(db,s.id,'reveal'));
+  act(db,s.id,'score',{index:0,participantId:p.id,points:3});
+  act(db,s.id,'reveal');
+  assert.deepEqual(view().question.pairs,pairs);
+  assert.equal(view().points,3);
 });
 
 test('HTTP: Quiz, Session, QR-Code, Upload, Bytebereiche, Fehler und Cross-Origin-Schutz',async t=>{

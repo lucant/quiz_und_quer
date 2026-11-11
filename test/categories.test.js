@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import {GameStore} from '../lib/game.js';
 function fixture(t,questions){const db=new GameStore(':memory:');t.after(()=>db.close());const q=db.saveQuiz({title:'Neue Typen',mode:'single',points:10,questions});const s=db.createSession(q.id);const p=db.join(s.id,{name:'Gast'});const action=(action,extra={})=>db.action(s.id,{revision:db.get('sessions',s.id).revision,action,...extra});return {db,s,p,action};}
 const base={text:'Frage',category:'Sport',answerMode:'digital',solution:'Erklärung'};
+
+test('Neue Reihenfolgen enthalten alle Fragen einmal und überspringen leere Kategorien',t=>{
+  const questions=[['A','A1'],['A','A2'],['A','A3'],['B','B1'],['C','C1'],['C','C2']].map(([category,text])=>({...base,type:'open',category,text}));
+  for(const ordering of ['random','roundRobin']) {
+    const {db,s,action}=fixture(t,questions);
+    const original=db.get('sessions',s.id).quiz.questions;
+    action('setup',{playMode:'digital',ordering});
+    assert.deepEqual(db.get('sessions',s.id).quiz.questions,original);
+    action('start');
+    const ordered=db.get('sessions',s.id).quiz.questions;
+    assert.deepEqual(ordered.map(q=>q.id).sort(),original.map(q=>q.id).sort());
+    if(ordering==='roundRobin')assert.deepEqual(ordered.map(q=>q.text),['A1','B1','C1','A2','C2','A3']);
+    action('open');
+    assert.deepEqual(db.get('sessions',s.id).quiz.questions,ordered);
+  }
+});
 test('Kategorienbrett, Gruppierung und Modus ohne Antworten mit manuellen Punkten',t=>{
   const {db,s,p,action}=fixture(t,[{...base,type:'boolean',correct:[0]},{...base,category:'Musik',type:'open'},{...base,type:'estimate',target:42,tolerance:2}]);
   action('setup',{playMode:'moderated',ordering:'category'});action('start');

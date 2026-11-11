@@ -2,9 +2,11 @@ const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const phases = {lobby:'Lobby',board:'Kategorien',open:'Antwortphase',grading:'Bewertung',revealed:'Auflösung',finished:'Beendet'};
-const typeNames = {choice:'Multiple Choice',open:'Offene Frage',media:'Bild / Audio',boolean:'Wahr / Falsch',estimate:'Schätzfrage',order:'Reihenfolge',match:'Zuordnung',hint:'Hinweisfrage'};
+const typeNames = {choice:'Multiple Choice',open:'Offene Frage',media:'Bild / Audio',boolean:'Wahr / Falsch',estimate:'Schätzfrage',order:'Reihenfolge',match:'Zuordnung',multiText:'Mehrere Freitextantworten',hint:'Hinweisfrage'};
 let timer, state, config, draft, quizList = [], busy = false, audioEnabled = false, audioElement, mediaKey = '', routeKey = 0;
+const pendingUploads = new Set();
 let toastTimer;
+const expandedQuestions = new WeakSet();
 function toast(message,error=false) { const el=$('#toast'); el.textContent=message; el.className=error?'error':'';el.style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.style.display='none',4500); }
 async function api(path, options={}) {
   const response = await fetch(`/api${path}`, { ...options, headers: {'Content-Type':'application/json',...options.headers}, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
@@ -51,7 +53,7 @@ async function dashboard() {
   const [quizzes,sessions]=await Promise.all([api('/quizzes'),api('/sessions')]);quizList=quizzes;
   app.innerHTML=shell(`<section class="hero"><div><div class="eyebrow">Ein guter Abend beginnt mit einer Frage</div><h1>Bereit für die nächste Runde?</h1><p>Quiz vorbereiten, Freunde einladen, gemeinsam rätseln.</p></div>${btn('+ Neues Quiz','new','primary')}</section>
     <div class="section-title"><h2>Deine Quizze</h2><span>${quizzes.length} vorbereitet</span></div>
-    ${quizzes.length?`<div class="grid">${quizzes.map(q=>`<article class="card quiz-card"><div class="row between"><span class="badge">${q.mode==='team'?'TEAMS':'EINZELSPIELER'}</span><span class="muted small">${q.questions.length} Fragen</span></div><h2>${esc(q.title)}</h2><div class="meta"><span>${q.points} Grundpunkte</span><span>${q.questions.filter(q=>q.media).length} Medien</span></div><div class="actions">${btn('Session erstellen','create-session','primary',`data-id="${q.id}" ${q.questions.length?'':'disabled'}`)}${btn('Bearbeiten','edit','',`data-id="${q.id}"`)}${btn('Duplizieren','duplicate','',`data-id="${q.id}"`)}${btn('Löschen','delete-quiz','danger',`data-id="${q.id}"`)}</div></article>`).join('')}</div>`:`<div class="empty"><h2>Platz für deine erste Quizidee.</h2><p>Erstelle Fragen, lege Punkte fest und füge Bilder oder Audio hinzu.</p>${btn('Erstes Quiz erstellen','new','primary')}</div>`}
+    ${quizzes.length?`<div class="grid">${quizzes.map(q=>`<article class="card quiz-card"><div class="row between"><span class="badge">${q.mode==='team'?'TEAMS':'EINZELSPIELER'}</span><span class="muted small">${q.questions.length} Fragen</span></div><h2>${esc(q.title)}</h2><div class="meta"><span>${q.points} Grundpunkte</span><span>${q.questions.reduce((count,q)=>count+Number(!!q.media)+Number(!!q.solutionImage),0)} Medien</span></div><div class="actions">${btn('Session erstellen','create-session','primary',`data-id="${q.id}" ${q.questions.length?'':'disabled'}`)}${btn('Bearbeiten','edit','',`data-id="${q.id}"`)}${btn('Duplizieren','duplicate','',`data-id="${q.id}"`)}${btn('Löschen','delete-quiz','danger',`data-id="${q.id}"`)}</div></article>`).join('')}</div>`:`<div class="empty"><h2>Platz für deine erste Quizidee.</h2><p>Erstelle Fragen, lege Punkte fest und füge Bilder oder Audio hinzu.</p>${btn('Erstes Quiz erstellen','new','primary')}</div>`}
     <div class="section-title"><h2>Spielrunden & Archiv</h2><span>${sessions.length} Sessions</span></div>
     ${sessions.length?`<div class="card session-list">${sessions.reverse().map(s=>`<div class="session-row"><a class="session-main" href="/host/${s.id}"><div><strong>${esc(s.title)}</strong><p class="muted small">${s.id} · ${new Date(s.createdAt).toLocaleDateString('de-DE')} · ${s.participants} Teilnehmer</p></div><span class="badge ${s.phase==='finished'?'':'live'}">${phases[s.phase]} &nbsp; →</span></a>${btn('Löschen','delete-session','danger',`data-id="${s.id}" data-title="${esc(s.title)}"`)}</div>`).join('')}</div>`:'<p class="muted">Hier erscheinen deine laufenden und abgeschlossenen Spielrunden.</p>'}
     <div class="footer row between"><span>Für gemeinsame Abende. Ohne Cloud.</span><span>Bis zu 20 Geräte · Daten lokal gespeichert</span></div>`);
@@ -64,56 +66,111 @@ async function dashboard() {
     case 'create-session':b.disabled=true;{const s=await post('/sessions',{quizId:b.dataset.id});navigate(`/host/${s.id}`);}break;
   }}catch(err){toast(err.message,true);b.disabled=false;}};
 }
-function newQuestion(){return {category:'Allgemein',answerMode:'digital',pairs:[],hints:[],target:0,tolerance:0,unit:'',type:'choice',text:'',points:null,options:['','','',''],correct:[0],multiple:false,solution:'',media:null};}
+function newQuestion(){return {category:'Allgemein',answerMode:'digital',pairs:[],hints:[],target:0,tolerance:0,unit:'',type:'choice',text:'',points:null,options:['','','',''],correct:[0],multiple:false,solution:'',media:null,solutionImage:null};}
 async function editor(id) {
   if(id){const qs=await api('/quizzes');draft=structuredClone(qs.find(q=>q.id===id));if(!draft)throw new Error('Quiz nicht gefunden.');}
   else draft={title:'',mode:'single',points:10,questions:[newQuestion()]};
   draft.questions.forEach(q=>{q.answerMode ||= ['oral','media'].includes(q.type)?'oral':'digital';if(['text','oral'].includes(q.type))q.type='open';q.category ||= 'Allgemein';});
+  if(!id)expandedQuestions.add(draft.questions[0]);
   renderEditor();
 }
 function renderEditor() {
   const d=draft;
-  app.innerHTML=shell(`<div class="editor"><datalist id="categories">${[...new Set(d.questions.map(q=>q.category||'Allgemein'))].map(c=>`<option value="${esc(c)}">`).join('')}</datalist><div class="editor-head"><div><div class="eyebrow">Quizwerkstatt</div><h1>${d.id?'Quiz bearbeiten':'Neues Quiz'}</h1></div><div class="actions">${btn('Zurück','back')}${btn('Quiz speichern','save','primary')}</div></div>
+  d.categories=[...new Set(['Allgemein', ...(d.categories || []), ...d.questions.map(q=>q.category || 'Allgemein')])];
+  const categoryOrder = [...new Set(d.questions.map(q=>q.category || 'Allgemein'))].sort((a,b)=>a.localeCompare(b,'de'));
+  d.questions.sort((a,b)=>categoryOrder.indexOf(a.category||'Allgemein')-categoryOrder.indexOf(b.category||'Allgemein'));
+  app.innerHTML=shell(`<div class="editor"><div class="editor-head"><div><div class="eyebrow">Quizwerkstatt</div><h1>${d.id?'Quiz bearbeiten':'Neues Quiz'}</h1></div><div class="actions">${btn('Zurück','back')}${btn('Quiz speichern','save','primary')}</div></div>
     <div class="card fields"><label>Quizname<input data-field="title" maxlength="120" placeholder="Zum Beispiel: Freitagabend mit Freunden" value="${esc(d.title)}"></label><label>Spielmodus<select data-field="mode"><option value="single" ${d.mode==='single'?'selected':''}>Einzelspieler</option><option value="team" ${d.mode==='team'?'selected':''}>Teams</option></select></label><label>Grundpunkte<input type="number" data-field="points" min="0.5" max="1000" step="0.5" value="${d.points}"></label></div>
-    ${d.questions.map((q,i)=>`<section class="card question-edit" data-q="${i}"><div class="row between"><h3><span class="muted">${String(i+1).padStart(2,'0')} /</span> Frage</h3><div class="actions">${btn('↑','up','',`aria-label="Frage nach oben" ${i===0?'disabled':''}`)}${btn('↓','down','',`aria-label="Frage nach unten" ${i===d.questions.length-1?'disabled':''}`)}${btn('Entfernen','remove','danger')}</div></div>
+    <div class="card"><h2>Kategorien</h2><p>${d.categories.map(esc).join(' · ')}</p><form id="add-category" class="row"><label>Neue Kategorie<input name="category" required maxlength="60" placeholder="Zum Beispiel Serienorte"></label><button type="submit">Kategorie anlegen</button></form></div>
+    ${d.questions.map((q,i)=>`${i===0||q.category!==d.questions[i-1].category?`<h2 class="editor-category">${esc(q.category||'Allgemein')}</h2>`:''}<details class="card question-edit" data-q="${i}" ${expandedQuestions.has(q)?'open':''}><summary><span>${esc(q.text?.slice(0,130)||'Neue Frage')}</span><span class="muted small">${esc(typeNames[q.type])}</span></summary><div class="question-edit-body"><div class="row between"><h3><span class="muted">${String(i+1).padStart(2,'0')} /</span> Frage</h3><div class="actions">${btn('↑','up','',`aria-label="Frage nach oben" ${i===0||d.questions[i-1].category!==q.category?'disabled':''}`)}${btn('↓','down','',`aria-label="Frage nach unten" ${i===d.questions.length-1||d.questions[i+1].category!==q.category?'disabled':''}`)}${btn('Entfernen','remove','danger')}</div></div>
     <div class="qfields"><label>Fragetyp<select data-qfield="type">${Object.entries(typeNames).map(([v,l])=>`<option value="${v}" ${q.type===v?'selected':''}>${l}</option>`).join('')}</select></label><label>Punkte (leer = ${d.points})<input data-qfield="points" type="number" min="0.5" max="1000" step="0.5" placeholder="Grundpunkte" value="${q.points??''}"></label></div>
-    <div class="qfields"><label>Themenkategorie<input data-qfield="category" list="categories" maxlength="60" value="${esc(q.category||'Allgemein')}" placeholder="Zum Beispiel Sport"></label><label>Antwortart<select data-qfield="answerMode"><option value="digital" ${q.answerMode==='digital'?'selected':''}>Am Handy antworten</option><option value="oral" ${q.answerMode==='oral'?'selected':''}>Mündlich · Moderator bewertet</option></select></label></div>
+    <div class="qfields"><label>Themenkategorie<select data-qfield="category">${d.categories.map(c=>`<option value="${esc(c)}" ${c===(q.category||'Allgemein')?'selected':''}>${esc(c)}</option>`).join('')}</select></label><label>Antwortart<select data-qfield="answerMode"><option value="digital" ${q.answerMode==='digital'?'selected':''}>Am Handy antworten</option><option value="oral" ${q.answerMode==='oral'?'selected':''}>Mündlich · Moderator bewertet</option></select></label></div>
     ${extraEditor(q)}<label>Fragetext<textarea data-qfield="text" maxlength="4000" placeholder="Was möchtest du wissen?">${esc(q.text)}</textarea></label>
     ${q.type==='choice'?`<label class="checkline"><input type="checkbox" data-qfield="multiple" ${q.multiple?'checked':''}> Mehrere richtige Antworten</label><p class="muted small">Markiere die richtige Lösung. Punkte gibt es nur für die vollständig richtige Auswahl.</p>${q.options.map((v,j)=>`<div class="option-edit"><input aria-label="Option ${j+1} ist richtig" type="${q.multiple?'checkbox':'radio'}" name="correct-${i}" data-correct="${j}" ${q.correct.includes(j)?'checked':''}><input aria-label="Antwortoption ${j+1}" type="text" maxlength="500" data-option="${j}" value="${esc(v)}" placeholder="Antwort ${String.fromCharCode(65+j)}">${btn('×','remove-option','',`data-option-index="${j}" aria-label="Antwortoption entfernen" ${q.options.length<=2?'disabled':''}`)}</div>`).join('')}${btn('+ Antwortoption','add-option','',q.options.length>=8?'disabled':'')}`:`<p class="muted small">${q.answerMode==='digital'?'Gäste antworten am Handy.':'Die Antwort erfolgt mündlich.'} Du vergibst anschließend die Punkte pro ${d.mode==='team'?'Team':'Spieler'}, auch 0 oder Teilpunkte.</p>`}
     <div class="spacer"></div><label>Lösung / Erklärung für die Auflösung<textarea data-qfield="solution" maxlength="4000" placeholder="Wird erst bei der Auflösung gezeigt">${esc(q.solution)}</textarea></label>
-    <div class="upload"><label>Bild oder Audio · ausschließlich auf dem TV</label><p class="muted small">PNG, JPG, WebP, GIF, MP3, WAV, OGG oder M4A · maximal 20 MB</p>${q.media?`<p>${esc(q.media.name)} ${btn('Medium entfernen','remove-media')}</p>${q.media.type==='image'?`<img class="upload-preview" src="/uploads/${q.media.id}" alt="Medienvorschau">`:`<audio controls preload="metadata" src="/uploads/${q.media.id}"></audio>`}`:''}<input type="file" data-upload accept="image/png,image/jpeg,image/webp,image/gif,audio/mpeg,audio/wav,audio/ogg,audio/mp4,.m4a"></div>
-    </section>`).join('')}<div class="spacer"></div>${btn('+ Frage hinzufügen','add','full')}<p class="muted small footer">Änderungen betreffen nur die Vorlage. Bereits erstellte Spielsessions behalten ihre Fragen und Regeln.</p></div>`);
+    <div class="media-upload-pair">
+    <div class="upload"><label for="question-media-${i}">Frage · Bild oder Audio</label><p class="muted small">PNG, JPG, WebP, GIF, MP3, WAV, OGG oder M4A · maximal 20 MB</p>${q.media?`<p>${esc(q.media.name)} ${btn('Medium entfernen','remove-media')}</p>${q.media.type==='image'?`<img class="upload-preview" src="/uploads/${q.media.id}" alt="Medienvorschau">`:`<audio controls preload="metadata" src="/uploads/${q.media.id}"></audio>`}`:''}<input id="question-media-${i}" type="file" data-upload="media" accept="image/png,image/jpeg,image/webp,image/gif,audio/mpeg,audio/wav,audio/ogg,audio/mp4,.m4a"></div>
+    <div class="upload"><label for="solution-image-${i}">Auflösung · separates Lösungsbild (optional)</label><p class="muted small">Erscheint bei der Auflösung auf TV und Handys. PNG, JPG, WebP oder GIF · maximal 20 MB</p>${q.solutionImage?`<p>${esc(q.solutionImage.name)} ${btn('Lösungsbild entfernen','remove-solution-image')}</p><img class="upload-preview" src="/uploads/${esc(q.solutionImage.id)}" alt="Vorschau des Lösungsbildes">`:''}<input id="solution-image-${i}" type="file" data-upload="solutionImage" accept="image/png,image/jpeg,image/webp,image/gif"></div>
+    </div>
+    </div></details>`).join('')}<div class="spacer"></div>${btn('+ Frage hinzufügen','add','full')}<p class="muted small footer">Änderungen betreffen nur die Vorlage. Bereits erstellte Spielsessions behalten ihre Fragen und Regeln.</p></div>`);
+  for(const card of app.querySelectorAll('details[data-q]'))card.ontoggle=()=>{
+    const question=d.questions[Number(card.dataset.q)];
+    if(card.open)expandedQuestions.add(question);else expandedQuestions.delete(question);
+  };
+  $('#add-category').onsubmit=e=>{
+    e.preventDefault();
+    const name=e.currentTarget.elements.category.value.trim();
+    if(!name || d.categories.some(c=>c.toLocaleLowerCase('de')===name.toLocaleLowerCase('de'))) {
+      return toast('Bitte einen neuen Kategorienamen eingeben.',true);
+    }
+    d.categories.push(name);
+    renderEditor();
+    $('#add-category input').focus();
+  };
   app.oninput=e=>{const el=e.target;if(el.dataset.field){draft[el.dataset.field]=el.dataset.field==='points'?Number(el.value):el.value;}
     const section=el.closest('[data-q]');if(!section)return;const q=draft.questions[Number(section.dataset.q)];
     if(el.dataset.qfield){const f=el.dataset.qfield;q[f]=['target','tolerance'].includes(f)?Number(el.value):f==='points'?(el.value===''?null:Number(el.value)):f==='multiple'?el.checked:el.value;}
+    if(el.dataset.qfield==='text')section.querySelector('summary > span').textContent=el.value.slice(0,130)||'Neue Frage';
     if(el.dataset.lines==='options')q.options=el.value.split('\n');
     if(el.dataset.lines==='hints')q.hints=el.value.split('\n');
     if(el.dataset.lines==='pairs')q.pairs=el.value.split('\n').map(line=>{const [left,...right]=line.split('|');return {left:left.trim(),right:right.join('|').trim()};});
+    if(el.dataset.pairIndex!==undefined)q.pairs[Number(el.dataset.pairIndex)][el.dataset.pairField]=el.value;
     if(el.dataset.option!==undefined)q.options[Number(el.dataset.option)]=el.value;
   };
   app.onchange=async e=>{const el=e.target,section=el.closest('[data-q]');if(!section)return;const q=draft.questions[Number(section.dataset.q)];
-    if(el.dataset.qfield==='type'){if(q.type==='boolean')q.correct=[0];if(q.type==='choice' && q.options.length<2){q.options=['','','',''];q.correct=[0];}renderEditor();}
+    if(el.dataset.qfield==='category'){renderEditor();return;}
+    if(el.dataset.qfield==='type'){if(q.type==='multiText' && !q.pairs?.length)q.pairs=[{left:'',right:''},{left:'',right:''}];if(q.type==='boolean')q.correct=[0];if(q.type==='choice' && q.options.length<2){q.options=['','','',''];q.correct=[0];}renderEditor();}
     if(el.dataset.qfield==='multiple'){if(!q.multiple)q.correct=q.correct.slice(0,1);renderEditor();}
     if(el.hasAttribute('data-boolean'))q.correct=[Number(el.value)];
     if(el.dataset.correct!==undefined){const j=Number(el.dataset.correct);q.correct=q.multiple?(el.checked?[...q.correct,j]:q.correct.filter(n=>n!==j)):[j];}
     if(el.hasAttribute('data-upload') && el.files[0]){const file=el.files[0];if(file.size>20*1024*1024)return toast('Die Datei darf höchstens 20 MB groß sein.',true);el.disabled=true;
-      try{const r=await fetch('/api/uploads',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});const m=await r.json();if(!r.ok)throw new Error(m.error);q.media={...m,name:file.name};renderEditor();toast('Medium hochgeladen. Quiz bitte speichern.');}catch(err){toast(err.message,true);el.disabled=false;}}
+      const field = el.dataset.upload;
+      const activeDraft = draft;
+      pendingUploads.add(el);
+      try{const r=await fetch(field === 'solutionImage' ? '/api/uploads?type=image' : '/api/uploads',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});const m=await r.json();if(!r.ok)throw new Error(m.error);if(draft!==activeDraft || !draft.questions.includes(q))return; q[field]={...m,name:file.name};renderEditor();toast('Medium hochgeladen. Quiz bitte speichern.');}catch(err){toast(err.message,true);el.disabled=false;}finally{pendingUploads.delete(el);}}
   };
   app.onclick=async e=>{const b=e.target.closest('[data-action]');if(!b)return;const i=Number(b.closest('[data-q]')?.dataset.q),q=draft.questions[i];
+    for(const card of app.querySelectorAll('details[data-q]')){
+      if(card.open)expandedQuestions.add(draft.questions[Number(card.dataset.q)]);
+      else expandedQuestions.delete(draft.questions[Number(card.dataset.q)]);
+    }
     try{switch(b.dataset.action){
       case 'back':if(confirm('Editor verlassen? Nicht gespeicherte Änderungen gehen verloren.'))navigate('/');return;
-      case 'save':b.disabled=true;await api(draft.id?`/quizzes/${draft.id}`:'/quizzes',{method:draft.id?'PUT':'POST',body:draft});draft=null;toast('Quiz gespeichert.');navigate('/');return;
-      case 'add':draft.questions.push(newQuestion());break;
+      case 'save':if(pendingUploads.size)return toast('Bitte warte auf den Upload.',true);b.disabled=true;await api(draft.id?`/quizzes/${draft.id}`:'/quizzes',{method:draft.id?'PUT':'POST',body:draft});draft=null;toast('Quiz gespeichert.');navigate('/');return;
+      case 'add':{
+        const question=newQuestion();
+        expandedQuestions.add(question);
+        draft.questions.push(question);
+        renderEditor();
+        const card=app.querySelector(`[data-q="${draft.questions.indexOf(question)}"]`);
+        card.scrollIntoView({block:'start'});
+        card.querySelector('[data-qfield="text"]').focus({preventScroll:true});
+        return;
+      }
       case 'remove':if(confirm('Diese Frage aus der Vorlage entfernen?'))draft.questions.splice(i,1);break;
-      case 'up':[draft.questions[i-1],draft.questions[i]]=[q,draft.questions[i-1]];break;
-      case 'down':[draft.questions[i+1],draft.questions[i]]=[q,draft.questions[i+1]];break;
+      case 'up':
+      case 'down': {
+        const next=i+(b.dataset.action==='up'?-1:1);
+        if(next<0 || next>=draft.questions.length || draft.questions[next].category!==q.category)return;
+        [draft.questions[i],draft.questions[next]]=[draft.questions[next],q];
+        renderEditor();
+        const card=app.querySelector(`[data-q="${next}"]`);
+        const arrow=card.querySelector(`[data-action="${b.dataset.action}"]:enabled`) || card.querySelector('[data-action="up"]:enabled,[data-action="down"]:enabled');
+        arrow.focus({preventScroll:true});
+        card.scrollIntoView({block:'start'});
+        return;
+      }
       case 'add-option':q.options.push('');break;
       case 'remove-option':{const j=Number(b.dataset.optionIndex);q.options.splice(j,1);q.correct=q.correct.filter(n=>n!==j).map(n=>n>j?n-1:n);break;}
+      case 'add-field':if(q.pairs.length<20)q.pairs.push({left:'',right:''});break;
+      case 'remove-field':if(q.pairs.length>2)q.pairs.splice(Number(b.dataset.row),1);break;
+      case 'remove-solution-image':q.solutionImage=null;break;
       case 'remove-media':q.media=null;break;
     }renderEditor();}catch(err){toast(err.message,true);b.disabled=false;}
   };
 }
 function extraEditor(q){
+  if(q.type==='multiText')return `<p>Für jede Vorgabe erscheint am Handy ein Freitextfeld. Du bewertest die Antworten gemeinsam und kannst Teilpunkte vergeben.</p>${q.pairs.map((pair,i)=>`<div class="qfields"><label>Vorgabe ${i+1}<input data-pair-index="${i}" data-pair-field="left" maxlength="500" placeholder="z. B. Springfield" value="${esc(pair.left)}"></label><label>Musterlösung (optional)<input data-pair-index="${i}" data-pair-field="right" maxlength="500" placeholder="z. B. Die Simpsons" value="${esc(pair.right)}"></label></div>${btn('Vorgabe entfernen','remove-field','','data-row="'+i+'" '+(q.pairs.length<=2?'disabled':''))}`).join('')}${btn('+ Vorgabe','add-field','',q.pairs.length>=20?'disabled':'')}`;
   if(q.type==='boolean')return `<label>Richtige Antwort<select data-boolean><option value="0" ${q.correct?.[0]===0?'selected':''}>Wahr</option><option value="1" ${q.correct?.[0]===1?'selected':''}>Falsch</option></select></label>`;
   if(q.type==='estimate')return `<div class="fields"><label>Zielwert<input type="number" step="any" data-qfield="target" value="${q.target??0}"></label><label>Toleranz ±<input type="number" min="0" step="any" data-qfield="tolerance" value="${q.tolerance??0}"></label><label>Einheit<input data-qfield="unit" value="${esc(q.unit)}" placeholder="z. B. km"></label></div><p class="muted small">Innerhalb der Toleranz: volle Punkte. Außerhalb: 0 Punkte. Manuell korrigierbar.</p>`;
   if(q.type==='order')return `<label>Einträge in der richtigen Reihenfolge · ein Eintrag pro Zeile<textarea data-lines="options">${esc(q.options.join('\n'))}</textarea></label><p class="muted small">2–8 unterschiedliche Einträge. Die Anzeige wird pro Session gemischt.</p>`;
@@ -122,7 +179,15 @@ function extraEditor(q){
   return '';
 }
 function board(s){const cs=s.categories||[];return `<section class="category-board"><div class="eyebrow">${s.phase==='lobby'?'Das erwartet euch':'Euer Quizabend'}</div><h2>Kategorien im Überblick</h2><div class="category-grid">${cs.map(c=>`<div class="card category-tile ${c.completed===c.total?'done':''}"><h3>${esc(c.name)}</h3><strong>${c.total-c.completed}</strong><p class="muted">von ${c.total} Fragen offen</p><progress value="${c.completed}" max="${c.total}"></progress></div>`).join('')}</div></section>`;}
-function questionExtras(q){return `${q.category?`<span class="badge">${esc(q.category)}</span>`:''}${q.hints?.map((h,i)=>`<div class="notice">Hinweis ${i+1}: ${esc(h)}</div>`).join('')||''}${q.type==='estimate'&&q.target!==undefined?`<p class="solution">Zielwert: ${q.target} ${esc(q.unit)} · Toleranz ±${q.tolerance}</p>`:''}${q.correctOrder?`<div class="solution">${q.correctOrder.map((n,i)=>`${esc(q.labels?.[i]||String(i+1))} → ${esc(q.options[n])}`).join('<br>')}</div>`:''}`;}
+function solutionContent(q) {
+  const image = q.solutionImage;
+  const examples = q.type==='multiText' ? (q.pairs || []).filter(p=>p.right).map(p=>`<div>${esc(p.left)} → ${esc(p.right)}</div>`).join('') : '';
+  return esc(q.solution) + examples + (image ? `<img class="tv-media" src="/uploads/${esc(image.id)}" alt="Bild zur Auflösung">` : '');
+}
+function questionExtras(q){return `${q.type==='multiText'?fieldLabels(q):''}${q.category?`<span class="badge">${esc(q.category)}</span>`:''}${q.hints?.map((h,i)=>`<div class="notice">Hinweis ${i+1}: ${esc(h)}</div>`).join('')||''}${q.type==='estimate'&&q.target!==undefined?`<p class="solution">Zielwert: ${q.target} ${esc(q.unit)} · Toleranz ±${q.tolerance}</p>`:''}${q.correctOrder?`<div class="solution">${q.correctOrder.map((n,i)=>`${esc(q.labels?.[i]||String(i+1))} → ${esc(q.options[n])}`).join('<br>')}</div>`:''}`;}
+function fieldLabels(q) {
+  return `<ol>${(q.labels || []).map(label=>`<li>${esc(label)}</li>`).join('')}</ol>`;
+}
 function structuredAnswer(q,value,enabled){return `<div>${q.options.map((_,i)=>`<label>${esc(q.labels?.[i]||`Position ${i+1}`)}<select data-arrange="${i}" ${enabled?'':'disabled'}><option value="">Bitte wählen</option>${q.options.map((text,j)=>`<option value="${j}" ${value?.[i]===j?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`).join('')}</div>`;}
 function token(id){try{return JSON.parse(localStorage.getItem(`quiz-player-${id}`)||'null')?.token;}catch{return null;}}
 async function watch(id,role,key) {
@@ -151,7 +216,7 @@ async function joinForm(id,key) {
 }
 function phasebar(s){const n=['open','grading','revealed'].indexOf(s.phase);return `<div class="phasebar" aria-label="${phases[s.phase]}">${[0,1,2].map(i=>`<span class="${i<=n?'active':''}"></span>`).join('')}</div>`;}
 function choices(q,selected=[],enabled=false){return `<div class="choices">${q.options.map((v,i)=>`<${enabled?'button':'div'} class="option ${selected.includes(i)?'selected':''} ${q.correct?.includes(i)?'correct':''}" ${enabled?`data-choice="${i}" aria-pressed="${selected.includes(i)}"`:''}><span class="letter">${String.fromCharCode(65+i)}</span><span>${esc(v)}</span>${q.correct?.includes(i)?'<span aria-label="Richtige Antwort">✓</span>':''}</${enabled?'button':'div'}>`).join('')}</div>`;}
-function answerText(s,idx,pid){const q=s.quiz.questions[idx],v=s.answers[idx]?.[pid]?.value;return Array.isArray(v)?(v.map((n,i)=>(q.type==='match'?q.pairs[i].left+' → ':'')+q.options[n]).join(' · ')||'Keine Auswahl'):v ?? (['oral','media'].includes(q.type)?'Mündliche Antwort':'Keine Antwort');}
+function answerText(s,idx,pid){const q=s.quiz.questions[idx],v=s.answers[idx]?.[pid]?.value;if(q.type==='multiText' && Array.isArray(v))return q.pairs.map((p,i)=>p.left+' → '+(v[i]||'—')).join(' · ');return Array.isArray(v)?(v.map((n,i)=>(q.type==='match'?q.pairs[i].left+' → ':'')+q.options[n]).join(' · ')||'Keine Auswahl'):v ?? (['oral','media'].includes(q.type)?'Mündliche Antwort':'Keine Antwort');}
 function scoreRows(s,idx,editable){const q=s.quiz.questions[idx],max=q.points??s.quiz.points;return s.participants.map(p=>`<div class="grading-row"><strong>${avatar(p.avatar)}${esc(p.name)}</strong><span class="answer">${esc(answerText(s,idx,p.id))}</span>${editable?`<input aria-label="Punkte für ${esc(p.name)}" class="score-input" data-score="${p.id}" data-index="${idx}" type="number" min="0" max="${max}" step="0.5" placeholder="0–${max}" value="${s.scores[idx]?.[p.id]??''}">${btn('Setzen','score','',`data-pid="${p.id}" data-index="${idx}"`)}<div class="score-shortcuts">${[0,max/2,max].map(n=>btn(`${n} Pkt.`,'quick-score','',`data-pid="${p.id}" data-index="${idx}" data-points="${n}"`)).join('')}</div>`:`<strong>${s.scores[idx]?.[p.id]??'–'} Pkt.</strong>`}</div>`).join('');}
 function captureEdits(){return [...app.querySelectorAll('[data-score]')].filter(el=>el.dataset.dirty==='true').map(el=>({pid:el.dataset.score,index:el.dataset.index,value:el.value,focused:el===document.activeElement}));}
 function renderHost(s,previous) {
@@ -159,12 +224,12 @@ function renderHost(s,previous) {
   const oldBase=$('#base-url')?.value,baseFocused=document.activeElement?.id==='base-url';
   const q=s.quiz.questions[s.index],finished=s.phase==='finished';
   app.innerHTML=shell(`<div class="row between"><div><div class="eyebrow">${finished?'Spielarchiv':'Moderation'} / ${s.id}</div><h1>${esc(s.quiz.title)}</h1></div><div class="actions"><a href="/">← Dashboard</a><a href="/tv/${s.id}" target="_blank" rel="noopener"><button>TV / Beamer öffnen ↗</button></a></div></div><div class="spacer"></div><div class="split"><main>
-    ${s.phase==='lobby'?`<div class="card"><div class="row between"><h2>Alle da?</h2><span class="badge live">LOBBY OFFEN</span></div><p class="muted">${s.quiz.mode==='team'?'Jedes Team verwendet ein gemeinsames Gerät.':'Jeder spielt auf seinem eigenen Gerät.'} Nach dem Start ist der Beitritt geschlossen.</p>${participants(s.participants)}<div class="spacer"></div><div class="qfields"><label>Spielmodus<select id="play-mode"><option value="digital" ${s.playMode!=='moderated'?'selected':''}>Mit Antwortabgabe</option><option value="moderated" ${s.playMode==='moderated'?'selected':''}>Ohne Antwortabgabe</option></select></label><label>Fragenreihenfolge<select id="ordering"><option value="sequence" ${s.ordering!=='category'?'selected':''}>Reihenfolge der Vorlage</option><option value="category" ${s.ordering==='category'?'selected':''}>Nach Kategorien gruppiert</option></select></label></div>${btn('Einstellungen übernehmen','setup')}${board(s)}${btn('Quiz starten →','start','primary',s.participants.length?'':'disabled')}</div>`:s.phase==='board'?`<div class="card">${board(s)}<p class="muted">${s.index+1} von ${s.quiz.questions.length} Fragen abgeschlossen.</p>${s.index+1<s.quiz.questions.length?btn('Nächste Frage öffnen →','open','primary'):btn('Quiz endgültig beenden','finish','primary')}</div>`:finished?`<div class="card"><div class="eyebrow">Das Ergebnis steht fest</div><h2>Ein Abend. Viele gute Antworten.</h2>${ranking(s.ranking)}<p class="muted small footer">Abgeschlossen am ${new Date(s.finishedAt).toLocaleString('de-DE')}. Antworten und Punkte sind endgültig.</p></div>`:`<div class="card"><div class="row between"><span class="badge live">${phases[s.phase]}</span><span class="muted small">Frage ${s.index+1} / ${s.quiz.questions.length} · ${q.points??s.quiz.points} Punkte</span></div>${phasebar(s)}<div class="question-title">${esc(q.text)}</div>${questionExtras({...q,labels:q.pairs?.map(p=>p.left),hints:q.hints?.slice(0,s.hintsShown||0)})}${q.type==='hint'&&s.phase==='open'?btn('Nächsten Hinweis zeigen','hint','',s.hintsShown>=q.hints.length?'disabled':''):''}${['choice','boolean'].includes(q.type)?choices(q):`<p class="muted">${typeNames[q.type]}</p>`}
+    ${s.phase==='lobby'?`<div class="card"><div class="row between"><h2>Alle da?</h2><span class="badge live">LOBBY OFFEN</span></div><p class="muted">${s.quiz.mode==='team'?'Jedes Team verwendet ein gemeinsames Gerät.':'Jeder spielt auf seinem eigenen Gerät.'} Nach dem Start ist der Beitritt geschlossen.</p>${participants(s.participants)}<div class="spacer"></div><div class="qfields"><label>Spielmodus<select id="play-mode"><option value="digital" ${s.playMode!=='moderated'?'selected':''}>Mit Antwortabgabe</option><option value="moderated" ${s.playMode==='moderated'?'selected':''}>Ohne Antwortabgabe</option></select></label><label>Fragenreihenfolge<select id="ordering"><option value="sequence" ${!s.ordering||s.ordering==='sequence'?'selected':''}>Reihenfolge der Vorlage</option><option value="category" ${s.ordering==='category'?'selected':''}>Nach Kategorien gruppiert</option><option value="random" ${s.ordering==='random'?'selected':''}>Zufall</option><option value="roundRobin" ${s.ordering==='roundRobin'?'selected':''}>Je Kategorie und wieder von vorne</option></select></label></div>${btn('Einstellungen übernehmen','setup')}${board(s)}${btn('Quiz starten →','start','primary',s.participants.length?'':'disabled')}</div>`:s.phase==='board'?`<div class="card">${board(s)}<p class="muted">${s.index+1} von ${s.quiz.questions.length} Fragen abgeschlossen.</p>${s.index+1<s.quiz.questions.length?btn('Nächste Frage öffnen →','open','primary'):btn('Quiz endgültig beenden','finish','primary')}</div>`:finished?`<div class="card"><div class="eyebrow">Das Ergebnis steht fest</div><h2>Ein Abend. Viele gute Antworten.</h2>${ranking(s.ranking)}<p class="muted small footer">Abgeschlossen am ${new Date(s.finishedAt).toLocaleString('de-DE')}. Antworten und Punkte sind endgültig.</p></div>`:`<div class="card"><div class="row between"><span class="badge live">${phases[s.phase]}</span><span class="muted small">Frage ${s.index+1} / ${s.quiz.questions.length} · ${q.points??s.quiz.points} Punkte</span></div>${phasebar(s)}<div class="question-title">${esc(q.text)}</div>${questionExtras({...q,labels:q.pairs?.map(p=>p.left),hints:q.hints?.slice(0,s.hintsShown||0)})}${q.type==='hint'&&s.phase==='open'?btn('Nächsten Hinweis zeigen','hint','',s.hintsShown>=q.hints.length?'disabled':''):''}${['choice','boolean'].includes(q.type)?choices(q):`<p class="muted">${typeNames[q.type]}</p>`}
     ${s.phase==='open'?`<p class="muted">${Object.values(s.answers[s.index]||{}).filter(a=>Array.isArray(a.value)?a.value.length:a.value).length} / ${s.participants.length} Antworten eingegangen</p>${btn('Antworten schließen','close','primary')}`:''}
     ${s.phase==='grading'?`<h3>Bewertung</h3><p class="muted small">Jeden Teilnehmer bewerten, auch mit 0 Punkten. Maximal ${q.points??s.quiz.points} Punkte.</p>${scoreRows(s,s.index,true)}<div class="spacer"></div>${btn('Lösung aufdecken →','reveal','primary',s.participants.every(p=>s.scores[s.index]?.[p.id]!==undefined)?'':'disabled')}`:''}
-    ${s.phase==='revealed'?`<div class="solution">${esc(q.solution)}</div><div class="spacer"></div><div class="actions">${btn(s.showRanking?'Rangliste ausblenden':'Rangliste einblenden','ranking')}${s.boardEnabled?btn('Kategorien anzeigen →','next','primary'):s.index<s.quiz.questions.length-1?btn('Nächste Frage →','next','primary'):btn('Quiz endgültig beenden','finish','primary')}</div>`:''}</div>`}
+    ${s.phase==='revealed'?`<div class="solution">${solutionContent(q)}</div><div class="spacer"></div><div class="actions">${btn(s.showRanking?'Rangliste ausblenden':'Rangliste einblenden','ranking')}${s.boardEnabled?btn('Kategorien anzeigen →','next','primary'):s.index<s.quiz.questions.length-1?btn('Nächste Frage →','next','primary'):btn('Quiz endgültig beenden','finish','primary')}</div>`:''}</div>`}
     ${q?.media&&!finished&&s.phase!=='board'?`<div class="card" style="margin-top:20px"><h3>Medien auf dem TV</h3><p class="muted small">${esc(q.media.name)} · ${s.media.visible?'eingeblendet':'ausgeblendet'}</p><div class="media-controls">${btn(s.media.visible?'Medium ausblenden':'Medium einblenden','media-toggle')}${q.media.type==='audio'?`${btn(s.media.playing?'Pause':'Audio abspielen','media-play')}${btn('Von vorne','media-reset')}`:''}</div>${q.media.type==='audio'?'<p class="muted small">Auf dem TV zuerst einmal „Audio aktivieren“ anklicken. Audio startet nur dort.</p>':''}</div>`:''}
-    ${s.index>=0?`<details id="history" ${finished?'open':''}><summary>Antworten & Punkte je Frage${finished?'':' · Korrekturen'}</summary>${s.quiz.questions.slice(0,s.index+(s.phase==='open'?0:1)).map((hq,i)=>`<div class="card archive-question"><h3>${i+1}. ${esc(hq.text)}</h3><p class="muted small">${typeNames[hq.type]} · ${hq.points??s.quiz.points} Punkte</p>${scoreRows(s,i,!finished)}${hq.solution?`<p class="solution">Lösung: ${esc(hq.solution)}</p>`:''}</div>`).join('')}</details>`:''}
+    ${s.index>=0?`<details id="history" ${finished?'open':''}><summary>Antworten & Punkte je Frage${finished?'':' · Korrekturen'}</summary>${s.quiz.questions.slice(0,s.index+(s.phase==='open'?0:1)).map((hq,i)=>`<div class="card archive-question"><h3>${i+1}. ${esc(hq.text)}</h3><p class="muted small">${typeNames[hq.type]} · ${hq.points??s.quiz.points} Punkte</p>${scoreRows(s,i,!finished)}${hq.solution||hq.solutionImage||hq.type==='multiText'?`<p class="solution">Lösung: ${solutionContent(hq)}</p>`:''}</div>`).join('')}</details>`:''}
     ${s.corrections.length?`<details id="audit"><summary>Bewertungsprotokoll (${s.corrections.length})</summary>${s.corrections.map(c=>`<p class="muted small">${new Date(c.at).toLocaleTimeString('de-DE')} · Frage ${c.index+1} · ${esc(s.participants.find(p=>p.id===c.participantId)?.name)}: ${c.previous??'offen'} → ${c.points} Punkte</p>`).join('')}</details>`:''}
     </main><aside class="side"><div class="card"><div class="eyebrow">${s.quiz.mode==='team'?'Teams':'Spieler'}</div><h2>${s.participants.length} <span class="muted">/ 20 dabei</span></h2>${s.phase==='lobby'?`<img class="qr" src="${qr(s.id)}" alt="QR-Code zum Beitreten"><div class="big-code" style="font-size:22px;text-align:center">${s.id}</div><p class="join-url">${esc(joinLink(s.id))}</p>${btn('Link kopieren','copy','full')}`:participants(s.participants)}</div>
     ${s.phase==='lobby'?`<div class="card"><label>Adresse für Gäste<input id="base-url" value="${esc(baseUrl())}" placeholder="http://192.168.178.20:3000"></label><p class="muted small">Nutze die LAN-IP des Docker-Rechners. „localhost“ funktioniert nur auf diesem Rechner.</p>${btn('Adresse übernehmen','base','full')}<p class="muted small">Erkannte Adressen:<br>${config.addresses.map(esc).join('<br>')||'Keine LAN-Adresse erkannt.'}</p></div>`:!finished?`<div class="card"><h3>Aktueller Punktestand</h3>${ranking(s.ranking)}</div>`:''}</aside></div>`,'shell',finished?'Archiv':'Spielleitung');
@@ -195,10 +260,11 @@ function renderPlayer(s,previous) {
   const q=s.question;
   app.innerHTML=shell(`<div class="row between"><span class="eyebrow">${avatar(s.participant.avatar)}${esc(s.participant.name)}</span><span class="badge">${s.mode==='team'?'TEAM':'SPIELER'}</span></div>
     ${s.phase==='lobby'?`<div class="card"><div class="eyebrow">Du bist dabei</div><h1>${esc(s.title)}</h1><p class="muted">Mach es dir bequem. Der Moderator startet die Runde.</p>${participants(s.participants)}${board(s)}</div>`:s.phase==='board'?board(s):s.showRanking?`<div class="card"><div class="eyebrow">${s.phase==='finished'?'Endergebnis':'Zwischenstand'}</div><h1>${s.phase==='finished'?'Danke fürs Mitspielen!':'So steht’s gerade.'}</h1>${ranking(s.ranking)}</div>`:`<div class="card"><div class="row between"><span class="badge live">${phases[s.phase]}</span><span class="muted small">${s.index+1} / ${s.total} · ${q.points} Punkte</span></div>${phasebar(s)}<h1 class="question-title">${esc(q.text)}</h1>${q.category?`<span class="badge">${esc(q.category)}</span>`:''}<div id="live-hints">${(q.hints||[]).map((h,i)=>`<div class="notice">Hinweis ${i+1}: ${esc(h)}</div>`).join('')}</div>${playerQuestion(s,q)}
-    ${s.phase==='open'&&q.canAnswer?`<p id="save-state" class="saving small" aria-live="polite">${s.answer?'Antwort gespeichert. Änderungen sind noch möglich.':q.type==='choice'?'Auswahl wird automatisch gespeichert.':q.type==='text'?'Du kannst deine Antwort bis zum Schließen ändern.':''}</p>`:s.phase==='open'?'<div class="notice">Ihr antwortet mündlich. Der Moderator vergibt die Punkte.</div>':s.phase==='grading'?'<div class="notice">Antworten geschlossen. Der Moderator bewertet gerade.</div>':`<div class="notice">${s.points??0} von ${q.points} Punkten für euch.</div><div class="solution">${esc(q.solution)}</div>`}</div>`}<p class="muted small footer">${esc(s.title)} · Session ${s.id}</p>`,'player-shell','Mitspielen');
+    ${s.phase==='open'&&q.canAnswer?`<p id="save-state" class="saving small" aria-live="polite">${s.answer?'Antwort gespeichert. Änderungen sind noch möglich.':q.type==='choice'?'Auswahl wird automatisch gespeichert.':q.type==='text'?'Du kannst deine Antwort bis zum Schließen ändern.':''}</p>`:s.phase==='open'?'<div class="notice">Ihr antwortet mündlich. Der Moderator vergibt die Punkte.</div>':s.phase==='grading'?'<div class="notice">Antworten geschlossen. Der Moderator bewertet gerade.</div>':`<div class="notice">${s.points??0} von ${q.points} Punkten für euch.</div><div class="solution">${solutionContent(q)}</div>`}</div>`}<p class="muted small footer">${esc(s.title)} · Session ${s.id}</p>`,'player-shell','Mitspielen');
   app.onclick=async e=>{const choice=e.target.closest('[data-choice]'),b=e.target.closest('[data-action="save-answer"]');if((!choice&&!b)||busy)return;
     let value;
     if(choice){const selected=[...app.querySelectorAll('.option.selected')].map(el=>Number(el.dataset.choice));const i=Number(choice.dataset.choice);value=q.multiple?(selected.includes(i)?selected.filter(v=>v!==i):[...selected,i]):[i];}
+    else if(q.type==='multiText')value=[...app.querySelectorAll('[data-field-answer]')].map(el=>el.value);
     else if(['order','match'].includes(q.type)){const inputs=[...app.querySelectorAll('[data-arrange]')];if(inputs.some(el=>el.value===''))return toast('Bitte alle Positionen zuordnen.',true);value=inputs.map(el=>Number(el.value));}else if(q.type==='estimate'){if($('#answer-text').value==='')return toast('Bitte eine Zahl eingeben.',true);value=Number($('#answer-text').value);}else value=$('#answer-text').value;
     busy=true;if(b)b.disabled=true;const status=$('#save-state');status.textContent='Wird gespeichert …';
     try{const result=await post(`/sessions/${s.id}/answer`,{index:s.index,value},{Authorization:`Bearer ${token(s.id)}`});if(state.index===s.index&&state.phase==='open'){if(choice){for(const el of app.querySelectorAll('[data-choice]')){const selected=result.value.includes(Number(el.dataset.choice));el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));}}status.textContent='Gespeichert ✓ Änderungen sind noch möglich.';}}
@@ -209,19 +275,54 @@ function playerQuestion(s,q){
   const enabled=s.phase==='open'&&q.canAnswer;
   let html='';
   if(['choice','boolean'].includes(q.type))html=choices(q,s.answer?.value||[],enabled);
+  else if(q.type==='multiText')html=q.canAnswer?(q.labels||[]).map((label,i)=>`<label>${esc(label)}<input type="text" data-field-answer maxlength="500" value="${esc(s.answer?.value?.[i])}" ${enabled?'':'disabled'}></label>`).join(''):fieldLabels(q);
   else if(['order','match'].includes(q.type))html=q.canAnswer?structuredAnswer(q,s.answer?.value,enabled):`<div class="card">${q.labels?`<p>${q.labels.map(esc).join(' · ')}</p>`:''}<p>${q.options.map(esc).join(' · ')}</p></div>`;
   else if(q.canAnswer)html=q.type==='estimate'?`<label>Deine Antwort (${esc(q.unit||'Zahl')})<input type="number" step="any" id="answer-text" ${enabled?'':'disabled'} value="${esc(s.answer?.value??'')}"></label>`:`<label>Deine Antwort<textarea id="answer-text" maxlength="4000" ${enabled?'':'disabled'}>${esc(s.answer?.value||'')}</textarea></label>`;
   if(enabled&&!['choice','boolean'].includes(q.type))html+=btn('Antwort speichern','save-answer','primary');
-  if(s.phase==='revealed')html+=questionExtras({...q,hints:[],category:null});
+  if(s.phase==='revealed' && q.type!=='multiText')html+=questionExtras({...q,hints:[],category:null});
   return html;
 }
+function fitTV() {
+  const content=document.querySelector('.tv-fit-content');
+  if(!content)return;
+  const area=content.parentElement;
+  content.style.zoom=1;
+  let scale=1;
+  for(let attempt=0;attempt<100;attempt++){
+    if(content.getBoundingClientRect().height<=area.clientHeight && content.scrollWidth<=content.clientWidth+1)break;
+    scale*=0.94;
+    content.style.zoom=scale;
+  }
+}
+window.addEventListener('resize',()=>requestAnimationFrame(fitTV));
 function renderTV(s,previous) {
   const q=s.question;
   const transitionKey=v=>v?`${v.phase}:${v.index}:${!!v.showRanking}`:'';
   const animate=transitionKey(s)!==transitionKey(previous);
   // Keep the audio DOM node alive across polls to avoid restarting playback.
   if(audioElement)audioElement.remove();
-  app.innerHTML=shell(s.phase==='lobby'?`<section class="tv-lobby"><div><div class="eyebrow">Willkommen zum Quizabend</div><h1>${esc(s.title)}</h1><p class="muted">Handy raus. Code scannen. Miträtseln.</p><div class="spacer"></div>${participants(s.participants)}${board(s)}</div><div class="card"><img class="qr" src="${qr(s.id)}" alt="QR-Code zur Spielrunde"><p class="join-url">${esc(joinLink(s.id))}</p><div class="big-code">${s.id}</div></div></section>`:s.phase==='board'?board(s):s.showRanking?`<div class="eyebrow">${s.phase==='finished'?'Ein großartiger Abend':'Zwischenstand'}</div><h1>${s.phase==='finished'?'Das ist euer Endergebnis.':'Wer liegt vorn?'}</h1><div class="card">${ranking(s.ranking)}</div>`:`<div class="row between"><span class="badge live">${phases[s.phase]}</span><span class="muted">Frage ${s.index+1} / ${s.total} · ${q.points} Punkte</span></div><h1 class="question-title">${esc(q.text)}</h1>${q.media?.type==='image'?`<img class="tv-media" src="/uploads/${q.media.id}" alt="Bild zur Quizfrage">`:''}<div id="audio-slot"></div>${questionExtras(q)}${['choice','boolean'].includes(q.type)?choices(q):['order','match'].includes(q.type)?`<div class="card">${q.options.map((v,i)=>`<p>${esc(q.labels?.[i]||String(i+1))} · ${esc(v)}</p>`).join('')}</div>`:''}${s.phase==='grading'?'<div class="notice">Antworten geschlossen. Die Punkte werden vergeben.</div>':''}${s.phase==='revealed'?`<div class="solution question-title">${esc(q.solution)}</div>`:''}`,'tv-shell','Gemeinsam rätseln');
+  app.innerHTML=shell(s.phase==='lobby'?`<section class="tv-lobby"><div><div class="eyebrow">Willkommen zum Quizabend</div><h1>${esc(s.title)}</h1><p class="muted">Handy raus. Code scannen. Miträtseln.</p><div class="spacer"></div>${participants(s.participants)}${board(s)}</div><div class="card"><img class="qr" src="${qr(s.id)}" alt="QR-Code zur Spielrunde"><p class="join-url">${esc(joinLink(s.id))}</p><div class="big-code">${s.id}</div></div></section>`:s.phase==='board'?board(s):s.showRanking?`<div class="eyebrow">${s.phase==='finished'?'Ein großartiger Abend':'Zwischenstand'}</div><h1>${s.phase==='finished'?'Das ist euer Endergebnis.':'Wer liegt vorn?'}</h1><div class="card">${ranking(s.ranking)}</div>`:`<div class="row between"><span class="badge live">${phases[s.phase]}</span><span class="muted">Frage ${s.index+1} / ${s.total} · ${q.points} Punkte</span></div><h1 class="question-title">${esc(q.text)}</h1>${q.media?.type==='image'?`<img class="tv-media" src="/uploads/${q.media.id}" alt="Bild zur Quizfrage">`:''}<div id="audio-slot"></div>${questionExtras(q)}${['choice','boolean'].includes(q.type)?choices(q):['order','match'].includes(q.type)?`<div class="card">${q.options.map((v,i)=>`<p>${esc(q.labels?.[i]||String(i+1))} · ${esc(v)}</p>`).join('')}</div>`:''}${s.phase==='grading'?'<div class="notice">Antworten geschlossen. Die Punkte werden vergeben.</div>':''}${s.phase==='revealed'?`<div class="solution question-title">${solutionContent(q)}</div>`:''}`,'tv-shell','Gemeinsam rätseln');
+  const stage = $('.tv-stage');
+  const solutionPicture = stage.querySelector('.solution .tv-media');
+  const questionPicture = stage.querySelector(':scope > .tv-media');
+  const picture = solutionPicture || questionPicture;
+  if (picture) {
+    questionPicture?.remove();
+    picture.remove();
+    const copy = document.createElement('section');
+    copy.className = 'tv-image-copy';
+    copy.append(...stage.childNodes);
+    stage.append(copy, picture);
+    stage.classList.add('tv-image-stage');
+    stage.parentElement.classList.add('tv-with-image');
+  }
+  const fitArea=stage.querySelector('.tv-image-copy') || stage;
+  const content=document.createElement('div');
+  content.className='tv-fit-content';
+  content.append(...fitArea.childNodes);
+  fitArea.append(content);
+  requestAnimationFrame(fitTV);
+  for(const image of stage.querySelectorAll('img'))image.addEventListener('load',fitTV,{once:true});
   if(animate)$('.tv-stage').classList.add('is-entering');
   else if((q?.hints?.length||0)>(previous?.question?.hints?.length||0))$('.tv-stage .notice:last-of-type')?.classList.add('hint-entering');
   if(q?.media?.type==='audio' && !s.showRanking){
